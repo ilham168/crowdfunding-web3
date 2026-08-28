@@ -1,0 +1,31 @@
+/* Layer canvas partikel antigravity - taruh di belakang konten */
+.particles-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none; /* klik & hover tetap tembus ke elemen di atasnya */
+  z-index: 0;
+}
+
+/* Dipakai di halaman login: full-screen, kartu login di atasnya */
+.auth-screen {
+  position: relative;
+  overflow: hidden;
+}
+.auth-card {
+  position: relative;
+  z-index: 1;
+  background: var(--bg);
+}
+
+/* Dipakai di dashboard: canvas fixed menutupi seluruh viewport,
+   konten halaman tetap di atas dan bisa diklik normal */
+.particles-canvas.fixed-bg {
+  position: fixed;
+  z-index: -1;
+}
+.page {
+  position: relative;
+  z-index: 1;
+}
