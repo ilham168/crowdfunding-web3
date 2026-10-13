@@ -21,17 +21,11 @@ blockchain — tabel di database hanya cache UI yang sudah diverifikasi server.
 - **Donasi terverifikasi on-chain:** server memeriksa transaksi Solana sebelum mencatatnya.
 - **Transparan & "tutup bukan hapus":** riwayat donasi tidak bisa dihapus.
 
-## Tangkapan Layar
+## Demo Langsung
 
-> Ganti placeholder di bawah dengan screenshot asli (taruh di `docs/screenshots/`).
+🔗 **[https://crowdfunding-web3-xaho.vercel.app/#/login](https://crowdfunding-web3-xaho.vercel.app/#/login)**
 
-| Login | Dashboard |
-| --- | --- |
-| ![Login](docs/screenshots/login.png) | ![Dashboard](docs/screenshots/dashboard.png) |
-
-| Detail campaign & donasi | Panel moderator |
-| --- | --- |
-| ![Detail campaign](docs/screenshots/campaign.png) | ![Panel moderator](docs/screenshots/admin.png) |
+> Demo di Solana Devnet. Login memakai ekstensi Phantom (set ke Devnet).
 
 ## Fitur
 
