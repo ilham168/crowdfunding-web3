@@ -1,5 +1,6 @@
 import { navigate } from '../router.js';
 import { supabase } from '../supabaseClient.js';
+import { isAdminWallet } from '../adminAccess.js';
 import { disconnectWallet, explorerUrl } from '../wallet.js';
 import { renderNav, bindLogout } from '../components/nav.js';
 import { escapeHtml, shortAddress, formatDate, requireWallet } from '../utils.js';
@@ -9,9 +10,10 @@ import { subscribeDonations, createDedupe } from '../realtime.js';
 export async function renderTransparency(root) {
   const wallet = requireWallet();
   if (!wallet) return;
+  const isAdmin = await isAdminWallet(wallet);
 
   root.innerHTML = `
-    ${renderNav('transparency', wallet)}
+    ${renderNav('transparency', wallet, null, isAdmin)}
     <section class="page">
       <h1>Buku Kas Transparan
         <span id="live-badge" class="live-badge" role="status">…</span>
@@ -144,7 +146,7 @@ function donationRow(d) {
       <td data-label="Donatur"><span class="addr" title="${escapeHtml(d.donor_wallet)}" aria-label="${escapeHtml(d.donor_wallet)}">${shortAddress(d.donor_wallet)}</span></td>
       <td data-label="Jumlah">${Number(d.amount_sol).toFixed(4)} SOL</td>
       <td data-label="Waktu">${formatDate(d.created_at)}</td>
-      <td data-label="Bukti"><a href="${explorerUrl(d.tx_signature)}" target="_blank" rel="noopener">Lihat</a></td>
+      <td data-label="Bukti"><a href="${explorerUrl(d.tx_signature)}" target="_blank" rel="noopener noreferrer">Lihat</a></td>
     </tr>
   `;
 }

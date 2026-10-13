@@ -20,13 +20,14 @@ create table if not exists campaigns (
   target_amount numeric not null check (target_amount > 0 and target_amount <= 100000),
   campaign_wallet text not null check (campaign_wallet ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'),
   creator_wallet text not null check (creator_wallet ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'),
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  status text not null default 'active'
 );
 
 -- Tabel donations: catatan setiap donasi (mirror dari transaksi on-chain, untuk UI cepat)
 create table if not exists donations (
   id uuid primary key default gen_random_uuid(),
-  campaign_id uuid references campaigns(id) on delete cascade,
+  campaign_id uuid references campaigns(id) on delete restrict,
   donor_wallet text not null check (donor_wallet ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'),
   amount_sol numeric not null check (amount_sol > 0 and amount_sol <= 100000),
   tx_signature text not null unique check (tx_signature ~ '^[1-9A-HJ-NP-Za-km-z]{86,88}$'),

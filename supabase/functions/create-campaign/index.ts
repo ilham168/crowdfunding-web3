@@ -22,15 +22,29 @@
 
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { ed25519 } from 'npm:@noble/curves@1/ed25519.js';
+import {
+  getAllowedOrigins,
+  handlePreflight,
+  json,
+} from '../_shared/cors.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL');
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+
+// Origin project ini; dipakai agar photo_url hanya boleh menunjuk Storage
+// project ini (mencegah URL gambar dari host pihak ketiga).
+const SUPABASE_ORIGIN = (() => {
+  try {
+    return SUPABASE_URL ? new URL(SUPABASE_URL).origin : null;
+  } catch {
+    return null;
+  }
+})();
 
 // Batas toleransi kebaruan timestamp (mencegah replay tanda tangan lama).
 const MAX_MESSAGE_AGE_MS = 5 * 60 * 1000;
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]+$/;
-const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173'];
 
 // --- base58 decode (Solana public key) -----------------------------------
 const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
@@ -68,144 +82,187 @@ function getTimestamp(message: string): number {
 }
 
 // --- CORS ---------------------------------------------------------------
-function getAllowedOrigins(): string[] {
-  const raw = Deno.env.get('ALLOWED_ORIGINS');
-  if (raw && raw.trim()) {
-    return raw.split(',').map((s) => s.trim()).filter(Boolean);
-  }
-  return DEFAULT_ALLOWED_ORIGINS;
-}
-
-function buildCorsHeaders(origin: string | null) {
-  const allowed = getAllowedOrigins();
-  const value = origin && allowed.includes(origin) ? origin : DEFAULT_ALLOWED_ORIGINS[0];
-  return {
-    'Access-Control-Allow-Origin': value,
-    'Access-Control-Allow-Headers':
-      'authorization, x-client-info, apikey, content-type',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'X-Content-Type-Options': 'nosniff',
-  };
-}
-
-function json(body: unknown, status = 200, cors: Record<string, string>) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...cors, 'Content-Type': 'application/json' },
-  });
-}
+// Helper CORS dipakai dari ../_shared/cors.ts (libur duplikasi; lihat file itu).
 
 Deno.serve(async (req) => {
-  const origin = req.headers.get('origin');
+  const origin = req.headers.get('origin') ?? null;
   const allowedOrigins = getAllowedOrigins();
 
   if (origin && !allowedOrigins.includes(origin)) {
-    return json({ error: 'Origin tidak diizinkan.' }, 403, buildCorsHeaders(null));
+    return json({ error: 'Origin tidak diizinkan.' }, 403, origin);
   }
-  const cors = buildCorsHeaders(origin);
 
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { status: 204, headers: cors });
+    return handlePreflight(origin);
   }
   if (req.method !== 'POST') {
-    return json({ error: 'Method tidak diizinkan.' }, 405, cors);
+    return json({ error: 'Method tidak diizinkan.' }, 405, origin);
   }
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    return json({ error: 'Konfigurasi server tidak lengkap.' }, 500, cors);
+    return json({ error: 'Konfigurasi server tidak lengkap.' }, 500, origin);
   }
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-  let body: Record<string, unknown>;
   try {
-    body = await req.json() as Record<string, unknown>;
-  } catch {
-    return json({ error: 'Body harus berupa JSON.' }, 400, cors);
-  }
+    let body: Record<string, unknown>;
+    try {
+      body = await req.json() as Record<string, unknown>;
+    } catch {
+      return json({ error: 'Body harus berupa JSON.' }, 400, origin);
+    }
 
-  const {
-    title, description, target_amount, campaign_wallet, creator_wallet,
-    signed_message, signature,
-  } = body;
+    const {
+      title, description, target_amount, campaign_wallet, creator_wallet,
+      signed_message, signature,
+      photo_urls, location_lat, location_lng, location_label,
+    } = body;
 
-  // --- Validasi input dasar ---------------------------------------------
-  if (
-    typeof title !== 'string' || typeof description !== 'string' ||
-    typeof campaign_wallet !== 'string' || typeof creator_wallet !== 'string' ||
-    typeof signed_message !== 'string' || typeof signature !== 'string'
-  ) {
-    return json({ error: 'Field wajib tidak lengkap.' }, 400, cors);
-  }
+    // --- Validasi input dasar ---------------------------------------------
+    if (
+      typeof title !== 'string' || typeof description !== 'string' ||
+      typeof campaign_wallet !== 'string' || typeof creator_wallet !== 'string' ||
+      typeof signed_message !== 'string' || typeof signature !== 'string'
+    ) {
+      return json({ error: 'Field wajib tidak lengkap.' }, 400, origin);
+    }
 
-  if (title.trim().length < 3 || title.trim().length > 80) {
-    return json({ error: 'Judul harus antara 3 dan 80 karakter.' }, 400, cors);
-  }
-  if (description.trim().length < 10 || description.trim().length > 1000) {
-    return json({ error: 'Deskripsi harus antara 10 dan 1000 karakter.' }, 400, cors);
-  }
-  const amount = Number(target_amount);
-  if (!Number.isFinite(amount) || amount <= 0 || amount > 100000) {
-    return json({ error: 'Target donasi harus antara 0 dan 100000 SOL.' }, 400, cors);
-  }
+    if (title.trim().length < 3 || title.trim().length > 80) {
+      return json({ error: 'Judul harus antara 3 dan 80 karakter.' }, 400, origin);
+    }
+    if (description.trim().length < 10 || description.trim().length > 1000) {
+      return json({ error: 'Deskripsi harus antara 10 dan 1000 karakter.' }, 400, origin);
+    }
+    const amount = Number(target_amount);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 100000) {
+      return json({ error: 'Target donasi harus antara 0 dan 100000 SOL.' }, 400, origin);
+    }
 
-  // --- Verifikasi kepemilikan wallet -------------------------------------
-  // campaign_wallet harus identik dengan creator_wallet, dan pesan yang
-  // ditandatangani harus di-sign oleh pemilik campaign_wallet tsb.
-  if (campaign_wallet !== creator_wallet) {
-    return json({
-      error: 'Untuk saat ini, campaign_wallet harus sama dengan wallet yang menandatangani (creator).',
-    }, 422, cors);
-  }
-  if (!BASE58_RE.test(campaign_wallet) || campaign_wallet.length < 32 || campaign_wallet.length > 44) {
-    return json({ error: 'Format wallet tidak valid.' }, 400, cors);
-  }
+    // --- Validasi field OPSIONAL: foto & lokasi ------------------------------
+    // Semua field di bawah boleh tidak diisi (undefined/null) => campaign tetap
+    // boleh dipublikasikan. Hanya divalidasi format bila dikirim.
+    let photoArray: string[] | null = null;
+    if (photo_urls !== undefined && photo_urls !== null) {
+      if (!Array.isArray(photo_urls) || photo_urls.length === 0 || photo_urls.length > 5) {
+        return json({ error: 'photo_urls harus berupa array 1-5 URL.' }, 400, origin);
+      }
+      if (!SUPABASE_ORIGIN) {
+        return json({ error: 'Konfigurasi server tidak lengkap.' }, 500, origin);
+      }
+      for (const p of photo_urls) {
+        if (typeof p !== 'string' || p.length === 0 || p.length > 300) {
+          return json({ error: 'Setiap photo_url harus berupa URL https:// yang valid.' }, 400, origin);
+        }
+        let u: URL;
+        try {
+          u = new URL(p);
+        } catch {
+          return json({ error: 'Setiap photo_url harus berupa URL https:// yang valid.' }, 400, origin);
+        }
+        if (u.protocol !== 'https:' || u.origin !== SUPABASE_ORIGIN) {
+          return json(
+            { error: 'photo_url harus URL https dari Supabase Storage project ini.' },
+            400,
+            origin,
+          );
+        }
+      }
+      photoArray = photo_urls as string[];
+    }
 
-  // Verifikasi pesan: wallet yang disebut di dalam pesan harus cocok.
-  const signedAddr = getSignerAddress(signed_message);
-  if (signedAddr !== campaign_wallet) {
-    return json({ error: 'Pesan yang ditandatangani tidak sesuai kampanye ini.' }, 422, cors);
-  }
+    let lat: number | null = null;
+    let lng: number | null = null;
+    if (location_lat !== undefined && location_lat !== null && location_lat !== '') {
+      lat = Number(location_lat);
+      if (!Number.isFinite(lat) || lat < -90 || lat > 90) {
+        return json({ error: 'location_lat harus angka antara -90 dan 90.' }, 400, origin);
+      }
+    }
+    if (location_lng !== undefined && location_lng !== null && location_lng !== '') {
+      lng = Number(location_lng);
+      if (!Number.isFinite(lng) || lng < -180 || lng > 180) {
+        return json({ error: 'location_lng harus angka antara -180 dan 180.' }, 400, origin);
+      }
+    }
+    // Batas konsistensi: lat & lng harus hadir berpasangan.
+    if ((lat === null) !== (lng === null)) {
+      return json({ error: 'location_lat dan location_lng harus diisi keduanya (atau kosongkan).' }, 400, origin);
+    }
 
-  // Verifikasi kebaruan (anti replay).
-  const ts = getTimestamp(signed_message);
-  if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > MAX_MESSAGE_AGE_MS) {
-    return json({ error: 'Tanda tangan kedaluwarsa. Silakan ulangi.' }, 422, cors);
-  }
+    let label: string | null = null;
+    if (location_label !== undefined && location_label !== null && location_label !== '') {
+      if (typeof location_label !== 'string' || location_label.length > 120) {
+        return json({ error: 'location_label maksimal 120 karakter.' }, 400, origin);
+      }
+      label = location_label.trim() || null;
+    }
 
-  // Verifikasi tanda tangan Ed25519 terhadap public key Solana.
-  let pubkey: Uint8Array;
-  let sigBytes: Uint8Array;
-  try {
-    pubkey = base58ToBytes(campaign_wallet);
-    sigBytes = Uint8Array.from(atob(signature), (c) => c.charCodeAt(0));
-  } catch {
-    return json({ error: 'Gagal membaca public key / signature.' }, 400, cors);
-  }
-  if (pubkey.length !== 32 || sigBytes.length !== 64) {
-    return json({ error: 'Public key atau signature berukuran tidak valid.' }, 400, cors);
-  }
-  const msgBytes = new TextEncoder().encode(signed_message);
-  if (!ed25519.verify(sigBytes, msgBytes, pubkey)) {
-    return json({ error: 'Tanda tangan tidak valid: bukan pemilik wallet.' }, 422, cors);
-  }
+    // --- Verifikasi kepemilikan wallet -------------------------------------
+    // campaign_wallet harus identik dengan creator_wallet, dan pesan yang
+    // ditandatangani harus di-sign oleh pemilik campaign_wallet tsb.
+    if (campaign_wallet !== creator_wallet) {
+      return json({
+        error: 'Untuk saat ini, campaign_wallet harus sama dengan wallet yang menandatangani (creator).',
+      }, 422, origin);
+    }
+    if (!BASE58_RE.test(campaign_wallet) || campaign_wallet.length < 32 || campaign_wallet.length > 44) {
+      return json({ error: 'Format wallet tidak valid.' }, 400, origin);
+    }
 
-  // --- Simpan dengan service role ----------------------------------------
-  const { data, error: insertError } = await supabase
-    .from('campaigns')
-    .insert([{
-      title: title.trim(),
-      description: description.trim(),
-      target_amount: amount,
-      campaign_wallet,
-      creator_wallet,
-    }])
-    .select()
-    .single();
+    // Verifikasi pesan: wallet yang disebut di dalam pesan harus cocok.
+    const signedAddr = getSignerAddress(signed_message);
+    if (signedAddr !== campaign_wallet) {
+      return json({ error: 'Pesan yang ditandatangani tidak sesuai kampanye ini.' }, 422, origin);
+    }
 
-  if (insertError) {
-    console.error('[insert campaign]', insertError.message);
-    return json({ error: 'Gagal menyimpan campaign.' }, 500, cors);
+    // Verifikasi kebaruan (anti replay).
+    const ts = getTimestamp(signed_message);
+    if (!Number.isFinite(ts) || Math.abs(Date.now() - ts) > MAX_MESSAGE_AGE_MS) {
+      return json({ error: 'Tanda tangan kedaluwarsa. Silakan ulangi.' }, 422, origin);
+    }
+
+    // Verifikasi tanda tangan Ed25519 terhadap public key Solana.
+    let pubkey: Uint8Array;
+    let sigBytes: Uint8Array;
+    try {
+      pubkey = base58ToBytes(campaign_wallet);
+      sigBytes = Uint8Array.from(atob(signature), (c) => c.charCodeAt(0));
+    } catch {
+      return json({ error: 'Gagal membaca public key / signature.' }, 400, origin);
+    }
+    if (pubkey.length !== 32 || sigBytes.length !== 64) {
+      return json({ error: 'Public key atau signature berukuran tidak valid.' }, 400, origin);
+    }
+    const msgBytes = new TextEncoder().encode(signed_message);
+    if (!ed25519.verify(sigBytes, msgBytes, pubkey)) {
+      return json({ error: 'Tanda tangan tidak valid: bukan pemilik wallet.' }, 422, origin);
+    }
+
+    // --- Simpan dengan service role ----------------------------------------
+    const { data, error: insertError } = await supabase
+      .from('campaigns')
+      .insert([{
+        title: title.trim(),
+        description: description.trim(),
+        target_amount: amount,
+        campaign_wallet,
+        creator_wallet,
+        photo_urls: photoArray,
+        location_lat: lat,
+        location_lng: lng,
+        location_label: label,
+      }])
+      .select()
+      .single();
+
+    if (insertError) {
+      console.error('[insert campaign]', insertError.message);
+      return json({ error: 'Gagal menyimpan campaign.' }, 500, origin);
+    }
+
+    return json({ ok: true, campaign: data }, 201, origin);
+  } catch (err) {
+    console.error('[create-campaign] error tak terduga:', err);
+    return json({ error: 'Terjadi kesalahan internal.' }, 500, origin);
   }
-
-  return json({ ok: true, campaign: data }, 201, cors);
 });

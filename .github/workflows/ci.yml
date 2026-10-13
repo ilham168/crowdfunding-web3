@@ -33,7 +33,8 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Test
+        run: npm test
+
       - name: Build
         run: npm run build
-
-      # TODO: tambahkan npm test di sini setelah skill test-driven-development selesai

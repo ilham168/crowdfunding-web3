@@ -27,6 +27,7 @@ import {
   type Cluster,
   type SignaturePubkeyPair,
 } from 'npm:@solana/web3.js@1';
+import { getAllowedOrigins, handlePreflight, json } from '../_shared/cors.ts';
 
 const NETWORK = Deno.env.get('SOLANA_NETWORK') || 'devnet';
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL');
@@ -45,8 +46,6 @@ const AMOUNT_TOLERANCE_LAMPORTS = 1000;
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]+$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173'];
-
 // Bentuk minimal hasil getTransaction yang kita butuhkan. Di-cast defensif
 // karena tipe RPC dari @solana/web3.js cukup berubah-ubah antar versi.
 interface TxWithMeta {
@@ -59,35 +58,6 @@ interface TxWithMeta {
     preBalances: number[];
     postBalances: number[];
   } | null;
-}
-
-type CorsHeaders = Record<string, string>;
-
-function getAllowedOrigins(): string[] {
-  const raw = Deno.env.get('ALLOWED_ORIGINS');
-  if (raw && raw.trim()) {
-    return raw.split(',').map((s) => s.trim()).filter(Boolean);
-  }
-  return DEFAULT_ALLOWED_ORIGINS;
-}
-
-function buildCorsHeaders(origin: string | null): CorsHeaders {
-  const allowed = getAllowedOrigins();
-  const value = origin && allowed.includes(origin) ? origin : DEFAULT_ALLOWED_ORIGINS[0];
-  return {
-    'Access-Control-Allow-Origin': value,
-    'Access-Control-Allow-Headers':
-      'authorization, x-client-info, apikey, content-type',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'X-Content-Type-Options': 'nosniff',
-  };
-}
-
-function json(body: unknown, status = 200, cors: CorsHeaders): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...cors, 'Content-Type': 'application/json' },
-  });
 }
 
 function isValidSolanaAddress(address: string): boolean {
@@ -113,33 +83,33 @@ Deno.serve(async (req) => {
   const allowedOrigins = getAllowedOrigins();
 
   if (origin && !allowedOrigins.includes(origin)) {
-    return json({ error: 'Origin tidak diizinkan.' }, 403, buildCorsHeaders(null));
+    return json({ error: 'Origin tidak diizinkan.' }, 403, origin);
   }
-  const cors = buildCorsHeaders(origin);
 
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { status: 204, headers: cors });
+    return handlePreflight(origin);
   }
   if (req.method !== 'POST') {
-    return json({ error: 'Method tidak diizinkan.' }, 405, cors);
+    return json({ error: 'Method tidak diizinkan.' }, 405, origin);
   }
 
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     return json(
       { error: 'Konfigurasi server tidak lengkap (Supabase env kosong).' },
       500,
-      cors
+      origin
     );
   }
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-  let body: Record<string, unknown>;
   try {
-    body = await req.json() as Record<string, unknown>;
-  } catch {
-    return json({ error: 'Body harus berupa JSON.' }, 400, cors);
-  }
+    let body: Record<string, unknown>;
+    try {
+      body = await req.json() as Record<string, unknown>;
+    } catch {
+      return json({ error: 'Body harus berupa JSON.' }, 400, origin);
+    }
 
   const { campaign_id, donor_wallet, amount_sol, tx_signature } = body;
 
@@ -148,26 +118,26 @@ Deno.serve(async (req) => {
     typeof campaign_id !== 'string' || typeof donor_wallet !== 'string' ||
     typeof tx_signature !== 'string'
   ) {
-    return json({ error: 'campaign_id, donor_wallet, dan tx_signature wajib diisi.' }, 400, cors);
+    return json({ error: 'campaign_id, donor_wallet, dan tx_signature wajib diisi.' }, 400, origin);
   }
   if (!UUID_RE.test(campaign_id.toLowerCase())) {
-    return json({ error: 'campaign_id bukan UUID yang valid.' }, 400, cors);
+    return json({ error: 'campaign_id bukan UUID yang valid.' }, 400, origin);
   }
   if (!isValidSolanaAddress(donor_wallet)) {
-    return json({ error: 'Alamat wallet donatur tidak valid.' }, 400, cors);
+    return json({ error: 'Alamat wallet donatur tidak valid.' }, 400, origin);
   }
   const amount = Number(amount_sol);
   if (!Number.isFinite(amount) || amount <= 0 || amount > MAX_DONATION_SOL) {
     return json({
       error: `Jumlah donasi harus antara 0 dan ${MAX_DONATION_SOL} SOL.`,
-    }, 400, cors);
+    }, 400, origin);
   }
   if (
     tx_signature.length < 86 ||
     tx_signature.length > 88 ||
     !BASE58_RE.test(tx_signature)
   ) {
-    return json({ error: 'Signature transaksi bukan base58 yang valid.' }, 400, cors);
+    return json({ error: 'Signature transaksi bukan base58 yang valid.' }, 400, origin);
   }
 
   // --- Ambil campaign utk cek alamat penerima --------------------------
@@ -179,15 +149,15 @@ Deno.serve(async (req) => {
 
   if (campaignError) {
     console.error('[campaign lookup]', campaignError.message);
-    return json({ error: 'Gagal mengambil data campaign.' }, 500, cors);
+    return json({ error: 'Gagal mengambil data campaign.' }, 500, origin);
   }
   if (!campaign) {
-    return json({ error: 'Campaign tidak ditemukan.' }, 404, cors);
+    return json({ error: 'Campaign tidak ditemukan.' }, 404, origin);
   }
 
   const recipient = campaign.campaign_wallet as string;
   if (!isValidSolanaAddress(recipient)) {
-    return json({ error: 'Alamat penerima campaign tidak valid.' }, 500, cors);
+    return json({ error: 'Alamat penerima campaign tidak valid.' }, 500, origin);
   }
 
   // --- Verifikasi transaksi di jaringan Solana -------------------------
@@ -198,20 +168,20 @@ Deno.serve(async (req) => {
     }) as unknown as TxWithMeta | null;
   } catch (err) {
     console.error('[getTransaction]', err);
-    return json({ error: 'Gagal memverifikasi transaksi ke jaringan Solana.' }, 502, cors);
+    return json({ error: 'Gagal memverifikasi transaksi ke jaringan Solana.' }, 502, origin);
   }
 
   if (!tx || !tx.meta || tx.meta.err) {
-    return json({ error: 'Transaksi tidak ditemukan atau gagal di jaringan.' }, 422, cors);
+    return json({ error: 'Transaksi tidak ditemukan atau gagal di jaringan.' }, 422, origin);
   }
   if (!tx.transaction || !tx.transaction.signatures) {
-    return json({ error: 'Transaksi tidak memiliki tanda tangan yang bisa diverifikasi.' }, 422, cors);
+    return json({ error: 'Transaksi tidak memiliki tanda tangan yang bisa diverifikasi.' }, 422, origin);
   }
 
   // Pastikan transaksi benar-benar dibuat oleh si donatur (fee payer).
   const signers = signerPubkeys(tx.transaction);
   if (!signers.includes(donor_wallet)) {
-    return json({ error: 'Transaksi tidak ditandatangani oleh dompet donatur.' }, 422, cors);
+    return json({ error: 'Transaksi tidak ditandatangani oleh dompet donatur.' }, 422, origin);
   }
 
   // Decode ulang pesan transaksi untuk membaca daftar account keys.
@@ -221,7 +191,7 @@ Deno.serve(async (req) => {
       tx.transaction.serialize({ requireAllSignatures: false })
     );
   } catch {
-    return json({ error: 'Transaksi tidak bisa di-decode (format tidak didukung).' }, 422, cors);
+    return json({ error: 'Transaksi tidak bisa di-decode (format tidak didukung).' }, 422, origin);
   }
 
   const wantLamports = Math.round(amount * LAMPORTS_PER_SOL);
@@ -277,7 +247,7 @@ Deno.serve(async (req) => {
       error:
         `Transaksi ditemukan, tapi tidak cocok dengan donasi ${amount} SOL ` +
         `ke alamat penerima campaign.`,
-    }, 422, cors);
+    }, 422, origin);
   }
 
   // --- Verifikasi lolos: simpan donasi dengan service role -------------
@@ -294,10 +264,10 @@ Deno.serve(async (req) => {
 
   if (insertError) {
     if (insertError.code === '23505') {
-      return json({ error: 'Transaksi donasi ini sudah pernah dicatat.' }, 409, cors);
+      return json({ error: 'Transaksi donasi ini sudah pernah dicatat.' }, 409, origin);
     }
     console.error('[insert donation]', insertError.message);
-    return json({ error: 'Gagal menyimpan donasi.' }, 500, cors);
+    return json({ error: 'Gagal menyimpan donasi.' }, 500, origin);
   }
 
   return json({
@@ -305,5 +275,9 @@ Deno.serve(async (req) => {
     donation: data,
     verified: true,
     explorer: `https://explorer.solana.com/tx/${tx_signature}?cluster=${NETWORK}`,
-  }, 201, cors);
+  }, 201, origin);
+  } catch (err) {
+    console.error('[verify-donation] error tak terduga:', err);
+    return json({ error: 'Terjadi kesalahan internal.' }, 500, origin);
+  }
 });

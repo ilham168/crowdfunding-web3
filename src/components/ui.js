@@ -64,3 +64,112 @@ export function skeletonTable(rows = 4, cols = 4) {
 export function skeletonStat() {
   return `<div class="stat-box sk-stat" aria-hidden="true"><span class="sk" style="width:46%"></span></div>`;
 }
+
+/**
+ * Dialog konfirmasi yang accessible, menggantikan window.confirm.
+ *
+ * - Memakai <dialog> native: focus trap + Escape + ::backdrop sudah otomatis,
+ *   jadi TIDAK ada implementasi focus trap manual yang bisa salah.
+ * - Fokus awal diarahkan ke tombol batal (default aman untuk aksi destruktif).
+ * - Fokus dikembalikan ke elemen pemicu setelah ditutup.
+ * - resolve(true) hanya kalau pengguna menekan tombol konfirmasi.
+ *
+ * @param {object} opts
+ * @param {string} opts.title
+ * @param {string} [opts.message]       teks paragraf (plain text, di-escape)
+ * @param {string} [opts.detail]        baris detail tambahan (plain text)
+ * @param {string} [opts.confirmLabel]
+ * @param {string} [opts.cancelLabel]
+ * @param {'primary'|'danger'} [opts.variant]
+ * @param {Element} [opts.trigger]      elemen yang fokus dikembalikan ke
+ * @returns {Promise<boolean>}
+ */
+export function confirmDialog({
+  title,
+  message = '',
+  detail = '',
+  confirmLabel = 'Ya, lanjutkan',
+  cancelLabel = 'Batal',
+  variant = 'primary',
+  trigger = null,
+} = {}) {
+  return new Promise((resolve) => {
+    if (typeof document === 'undefined' || typeof document.createElement !== 'function') {
+      resolve(window.confirm ? window.confirm(message || title) : false);
+      return;
+    }
+
+    const previouslyFocused = trigger || document.activeElement;
+    const dlg = document.createElement('dialog');
+    dlg.className = 'confirm-dialog';
+    const uid = Math.random().toString(36).slice(2, 8);
+    const titleId = `confirm-dialog-title-${uid}`;
+    const msgId = `confirm-dialog-msg-${uid}`;
+
+    dlg.setAttribute('aria-labelledby', titleId);
+    if (message) dlg.setAttribute('aria-describedby', msgId);
+
+    const titleEl = document.createElement('h2');
+    titleEl.id = titleId;
+    titleEl.className = 'confirm-dialog-title';
+    titleEl.textContent = title;
+
+    const msgEl = document.createElement('p');
+    msgEl.id = msgId;
+    msgEl.className = 'confirm-dialog-msg';
+    msgEl.textContent = message;
+
+    const detailEl = document.createElement('p');
+    detailEl.className = 'confirm-dialog-detail muted';
+    detailEl.textContent = detail;
+
+    const actions = document.createElement('div');
+    actions.className = 'confirm-dialog-actions';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'btn-ghost';
+    cancelBtn.textContent = cancelLabel;
+
+    const confirmBtn = document.createElement('button');
+    confirmBtn.type = 'button';
+    confirmBtn.className = variant === 'danger' ? 'btn-danger' : 'btn-primary';
+    confirmBtn.textContent = confirmLabel;
+
+    actions.append(cancelBtn, confirmBtn);
+
+    if (message) dlg.append(titleEl, msgEl); else dlg.append(titleEl);
+    if (detail) dlg.append(detailEl);
+    dlg.append(actions);
+
+    let settled = false;
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      document.removeEventListener('keydown', onKeydown, true);
+      if (dlg.open) dlg.close();
+      dlg.remove();
+      if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+        previouslyFocused.focus();
+      }
+      resolve(result);
+    };
+
+    // Escape menutup dialog → dianggap "batal".
+    const onKeydown = (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        done(false);
+      }
+    };
+
+    cancelBtn.addEventListener('click', () => done(false));
+    confirmBtn.addEventListener('click', () => done(true));
+    document.addEventListener('keydown', onKeydown, true);
+
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    // Fokus awal ke tombol batal: aksi destruktif tidak boleh di-Enter tak sengaja.
+    cancelBtn.focus();
+  });
+}

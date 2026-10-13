@@ -1,5 +1,6 @@
 import { navigate } from '../router.js';
-import { callEdgeFunction } from '../supabaseClient.js';
+import { supabase, callEdgeFunction } from '../supabaseClient.js';
+import { isAdminWallet } from '../adminAccess.js';
 import { disconnectWallet, isValidSolanaAddress, signTextMessage } from '../wallet.js';
 import { renderNav, bindLogout } from '../components/nav.js';
 import { escapeHtml, requireWallet } from '../utils.js';
@@ -8,9 +9,10 @@ import { mountAntigravity, showToast, setBusy } from '../components/ui.js';
 export async function renderCreateCampaign(root) {
   const wallet = requireWallet();
   if (!wallet) return;
+  const isAdmin = await isAdminWallet(wallet);
 
   root.innerHTML = `
-    ${renderNav('create', wallet)}
+    ${renderNav('create', wallet, null, isAdmin)}
     <section class="page narrow">
       <a href="#/dashboard" class="back-link">&larr; Kembali</a>
       <h1>Buat Campaign Baru</h1>
@@ -34,6 +36,32 @@ export async function renderCreateCampaign(root) {
         <label>Alamat Dompet Penerima Dana
           <input type="text" name="campaign_wallet" required value="${escapeHtml(wallet)}" />
         </label>
+
+        <fieldset class="optional-block">
+          <legend>
+            <span class="optional-badge">Opsional</span>
+            Bukti &amp; Lokasi
+            <span class="optional-hint">Memperkuat kepercayaan donatur — semua optional, boleh dikosongkan.</span>
+          </legend>
+
+          <label>
+            <span class="muted">Foto dokumentasi (maks. 5, masing-masing maks. 5MB)</span>
+            <input id="doc-photos" type="file" accept="image/*" multiple />
+          </label>
+          <div id="photo-previews" class="photo-previews" aria-live="polite"></div>
+
+          <label>
+            <span class="muted">Titik lokasi (koordinat + label deskriptif)</span>
+            <div class="location-controls">
+              <input id="loc-lat" type="number" step="any" min="-90" max="90" placeholder="Latitude, contoh -6.9175" />
+              <input id="loc-lng" type="number" step="any" min="-180" max="180" placeholder="Longitude, contoh 107.6191" />
+            </div>
+            <input id="loc-label" type="text" maxlength="120" placeholder="Label lokasi, contoh: Desa Sukamaju, Kec. Cianjur" />
+            <button id="btn-use-location" type="button" class="btn-ghost">Gunakan Lokasi Saya</button>
+            <p id="loc-status" class="muted" hidden></p>
+          </label>
+        </fieldset>
+
         <button type="submit" class="btn-primary btn-block">Publikasikan Campaign</button>
       </form>
     </section>
@@ -43,6 +71,82 @@ export async function renderCreateCampaign(root) {
   bindLogout(root, () => {
     disconnectWallet();
     navigate('/login');
+  });
+
+  // --- State & logika foto dokumentasi (opsional) ------------------------
+  const photoFiles = [];
+  const photosInput = root.querySelector('#doc-photos');
+  const previews = root.querySelector('#photo-previews');
+
+  function renderPreviews() {
+    previews.innerHTML = photoFiles.map((f, i) => `
+      <figure class="photo-preview">
+        <img src="${URL.createObjectURL(f)}" alt="Pratinjau foto ${i + 1}" />
+        <button type="button" class="remove-photo" data-idx="${i}" aria-label="Hapus foto ${i + 1}">&times;</button>
+      </figure>
+    `).join('');
+  }
+
+  photosInput.addEventListener('change', () => {
+    const files = Array.from(photosInput.files) || [];
+    for (const file of files) {
+      if (!file.type.startsWith('image/')) {
+        showToast(`${file.name} bukan file gambar.`, 'error');
+        continue;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        showToast(`${file.name} melebihi 5MB.`, 'error');
+        continue;
+      }
+      if (photoFiles.length >= 5) {
+        showToast('Maksimal 5 foto per campaign.', 'error');
+        break;
+      }
+      photoFiles.push(file);
+    }
+    photosInput.value = '';
+    renderPreviews();
+  });
+
+  previews.addEventListener('click', (e) => {
+    const btn = e.target.closest('.remove-photo');
+    if (!btn) return;
+    photoFiles.splice(Number(btn.dataset.idx), 1);
+    renderPreviews();
+  });
+
+  // --- "Gunakan Lokasi Saya" (navigator.geolocation, opsional) -----------
+  const latInput = root.querySelector('#loc-lat');
+  const lngInput = root.querySelector('#loc-lng');
+  const locLabelInput = root.querySelector('#loc-label');
+  const locStatus = root.querySelector('#loc-status');
+
+  root.querySelector('#btn-use-location').addEventListener('click', () => {
+    if (!navigator.geolocation) {
+      locStatus.textContent = 'Browser tidak mendukung geolokasi. Silakan isi koordinat secara manual atau kosongkan.';
+      locStatus.hidden = false;
+      return;
+    }
+    locStatus.textContent = 'Meminta izin lokasi...';
+    locStatus.hidden = false;
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        latInput.value = pos.coords.latitude.toFixed(6);
+        lngInput.value = pos.coords.longitude.toFixed(6);
+        locStatus.textContent = 'Lokasi terisi.';
+      },
+      (err) => {
+        let msg = 'Gagal mengambil lokasi. Silakan isi secara manual atau kosongkan.';
+        if (err && err.code === 1) {
+          msg = 'Anda menolak izin lokasi. Bisa isi koordinat manual atau kosongkan saja.';
+        } else if (err && err.code === 2) {
+          msg = 'Lokasi tidak tersedia. Isi manual atau kosongkan saja.';
+        }
+        locStatus.textContent = msg;
+        locStatus.hidden = false;
+      },
+      { enableHighAccuracy: false, timeout: 10000 }
+    );
   });
 
   root.querySelector('#form-create').addEventListener('submit', async (e) => {
@@ -98,6 +202,52 @@ export async function renderCreateCampaign(root) {
       return;
     }
 
+    // Lokasi (opsional): kosongkan bila tidak valid → tidak memblokir submit.
+    let location_lat = latInput.value.trim();
+    let location_lng = lngInput.value.trim();
+    const location_label = locLabelInput.value.trim();
+    if (!location_lat || !location_lng) {
+      location_lat = null;
+      location_lng = null;
+    } else {
+      const latN = Number(location_lat);
+      const lngN = Number(location_lng);
+      if (isNaN(latN) || latN < -90 || latN > 90 || isNaN(lngN) || lngN < -180 || lngN > 180) {
+        showToast('Koordinat lokasi tidak valid. Periksa latitude/longitude atau kosongkan.', 'error');
+        return;
+      }
+      location_lat = latN;
+      location_lng = lngN;
+    }
+    const label = location_label || null;
+
+    setBusy(btn, true, 'Upload foto...');
+
+    // Upload foto ke Storage dulu, lalu simpan URL-nya (opsional).
+    let photo_urls = null;
+    try {
+      if (photoFiles.length) {
+        const urls = [];
+        for (const file of photoFiles) {
+          const ext = (file.type.split('/')[1] || 'bin').replace(/[^a-z0-9]/gi, '').toLowerCase() || 'bin';
+          const path = `campaign-photos/${wallet}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+          const { error: upErr } = await supabase.storage.from('campaign-photos').upload(path, file, { contentType: file.type });
+          if (upErr) throw upErr;
+          const { data: pub } = supabase.storage.from('campaign-photos').getPublicUrl(path);
+          urls.push(pub.publicUrl);
+        }
+        photo_urls = urls;
+      }
+    } catch (err) {
+      setBusy(btn, false);
+      console.error('[upload foto campaign]', err);
+      showToast(
+        `Gagal mengunggah foto (${err.message || 'error tidak dikenal'}). Coba lagi atau hapus foto.`,
+        'error'
+      );
+      return;
+    }
+
     setBusy(btn, true, 'Minta tanda tangan...');
     try {
       // Tanda tangani pesan yang mengikat wallet + judul + timestamp.
@@ -119,13 +269,27 @@ export async function renderCreateCampaign(root) {
         creator_wallet: wallet,
         signed_message,
         signature,
+        photo_urls,
+        location_lat,
+        location_lng,
+        location_label: label,
       });
 
       showToast('Campaign berhasil dipublikasikan.', 'success');
       navigate('/dashboard');
     } catch (err) {
-      showToast(err.message || 'Gagal membuat campaign.', 'error');
+      console.error('[create-campaign]', err);
       setBusy(btn, false);
+      // Bedakan penyebab: penolakan server vs kegagalan koneksi/fetch. Kata
+      // "Failed to fetch" dari browser tidak informatif bagi pengguna.
+      if (err instanceof Error && /Failed to fetch|NetworkError|ERR_NETWORK|ECONNREFUSED/i.test(err.message)) {
+        showToast(
+          'Gagal terhubung ke server donasi. Periksa koneksi internet lalu coba lagi.',
+          'error'
+        );
+        return;
+      }
+      showToast(err.message || 'Gagal membuat campaign.', 'error');
     }
   });
 }
